@@ -76,7 +76,7 @@ export const LoginPage = () => {
       <div className="auth-card">
         <h1 className="auth-title">
         Commissionly Sales Rep Portal</h1>
-        <p className="auth-subtitle">Sign in to manage your Shopify sales reps</p>
+        <p className="auth-subtitle">Sign in to manage your Shopify sales representatives.</p>
 
         <form className="auth-form" onSubmit={handleSubmit}>
           <div className="field">
