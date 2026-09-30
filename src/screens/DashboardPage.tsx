@@ -1,17 +1,102 @@
-import { useEffect, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   clearAuthSession,
   getOrdersTableData,
   getRepresentativeDetails,
   getRepresentativeProfile,
+  isAuthError,
   logoutRepresentative,
   updateRepresentativeProfile,
 } from '../api/repApi'
-import type { RepDashboardData } from '../api/repApi'
+import type { OrderLineItem, OrdersSortBy, RepDashboardData } from '../api/repApi'
+import { OrderDetailsView } from './OrderDetailsView'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { Select } from '../components/Select'
+import type { SelectOption } from '../components/Select'
 import './dashboard.css'
 
-type ActiveTab = 'dashboard' | 'orders' | 'profile'
+// Same as the admin Orders table: show 2 items, then "+N more".
+const MAX_VISIBLE_ITEMS = 2
+
+// Orders table filters, matching the admin Orders page.
+const ORDERS_PER_PAGE_OPTIONS = [10, 25, 50, 100]
+
+type OrdersSort = { sortBy: OrdersSortBy; sortOrder: 'asc' | 'desc' }
+type DatePreset = 'thisMonth' | 'last7' | 'last30' | 'custom'
+
+const DATE_PRESET_OPTIONS: SelectOption<DatePreset>[] = [
+  { value: 'thisMonth', label: 'This month' },
+  { value: 'last7', label: 'Last 7 days' },
+  { value: 'last30', label: 'Last 30 days' },
+  { value: 'custom', label: 'Custom range' },
+]
+
+const ORDERS_COLUMNS: { label: string; sortBy?: OrdersSortBy }[] = [
+  { label: 'Order ID', sortBy: 'orderId' },
+  { label: 'Order Value', sortBy: 'orderValue' },
+  { label: 'Commission %', sortBy: 'commissionPercent' },
+  { label: 'Commission Earned', sortBy: 'commissionEarned' },
+  // Status column hidden for now (UI only).
+  // { label: 'Status', sortBy: 'status' },
+  { label: 'Date', sortBy: 'date' },
+  { label: 'Items' },
+]
+
+const toDateKeyUtc = (date: Date) => date.toISOString().slice(0, 10)
+
+/** Same presets as the admin date range picker (UTC days). */
+const getPresetRange = (preset: Exclude<DatePreset, 'custom'>) => {
+  const now = new Date()
+  const y = now.getUTCFullYear()
+  const m = now.getUTCMonth()
+  if (preset === 'thisMonth') {
+    return {
+      from: toDateKeyUtc(new Date(Date.UTC(y, m, 1))),
+      to: toDateKeyUtc(new Date(Date.UTC(y, m + 1, 0))),
+    }
+  }
+  const today = new Date(Date.UTC(y, m, now.getUTCDate()))
+  const start = new Date(today)
+  start.setUTCDate(start.getUTCDate() - (preset === 'last7' ? 6 : 29))
+  return { from: toDateKeyUtc(start), to: toDateKeyUtc(today) }
+}
+
+// Small stroke icons for the Orders filter bar, table headers and pager.
+const Icon = ({ path, size = 16 }: { path: string; size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d={path} />
+  </svg>
+)
+const ICON_SEARCH = 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.35-4.35'
+const ICON_CLOSE = 'M18 6 6 18M6 6l12 12'
+const ICON_CALENDAR = 'M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'
+const ICON_CHEVRON_LEFT = 'M15 18l-6-6 6-6'
+const ICON_CHEVRON_RIGHT = 'M9 18l6-6-6-6'
+const ICON_SORT = 'M7 15l5 5 5-5M7 9l5-5 5 5'
+const ICON_SORT_ASC = 'M12 19V5M5 12l7-7 7 7'
+const ICON_SORT_DESC = 'M12 5v14M19 12l-7 7-7-7'
+
+/** "Hoodie (S / Black) × 2" */
+const formatLineItem = (item: OrderLineItem) => {
+  const variant =
+    item.variantTitle && item.variantTitle !== 'Default Title' ? ` (${item.variantTitle})` : ''
+  return `${item.title}${variant} × ${item.quantity}`
+}
+
+type ActiveTab = 'dashboard' | 'orders' | 'orderDetails' | 'profile'
+
+const ORDER_DETAILS_PATH_PREFIX = '/dashboard/orders/'
 
 const normalizeDashboardData = (input: unknown): RepDashboardData | null => {
   if (!input || typeof input !== 'object') return null
@@ -57,6 +142,7 @@ const getDefaultDashboardData = (): RepDashboardData => ({
 export const DashboardPage = () => {
   const navigate = useNavigate()
   const location = useLocation()
+  const { orderId: orderIdParam } = useParams()
   const [data, setData] = useState<RepDashboardData | null>(null)
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard')
   const [showProfileDropdown, setShowProfileDropdown] = useState(false)
@@ -65,10 +151,22 @@ export const DashboardPage = () => {
   const [editedName, setEditedName] = useState('')
   const [editedEmail, setEditedEmail] = useState('')
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [ordersPage, setOrdersPage] = useState(1)
   const [ordersTotalCount, setOrdersTotalCount] = useState(0)
   const [ordersTotalPages, setOrdersTotalPages] = useState(1)
   const [isOrdersLoading, setIsOrdersLoading] = useState(false)
+  const [ordersSearchInput, setOrdersSearchInput] = useState('')
+  const [ordersSearch, setOrdersSearch] = useState('')
+  const [ordersDatePreset, setOrdersDatePreset] = useState<DatePreset>('thisMonth')
+  const [ordersFromDate, setOrdersFromDate] = useState(() => getPresetRange('thisMonth').from)
+  const [ordersToDate, setOrdersToDate] = useState(() => getPresetRange('thisMonth').to)
+  const [ordersSort, setOrdersSort] = useState<OrdersSort>({ sortBy: 'date', sortOrder: 'desc' })
+  const [ordersPerPage, setOrdersPerPage] = useState(10)
+  const [ordersError, setOrdersError] = useState<string | null>(null)
+  // Bumped by "Retry" to refetch with the same filters.
+  const [ordersReloadKey, setOrdersReloadKey] = useState(0)
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode')
     return saved ? saved === 'true' : false
@@ -88,6 +186,10 @@ export const DashboardPage = () => {
       setActiveTab('orders')
       return
     }
+    if (location.pathname.startsWith(ORDER_DETAILS_PATH_PREFIX)) {
+      setActiveTab('orderDetails')
+      return
+    }
     if (location.pathname === '/dashboard/profile') {
       setActiveTab('profile')
       return
@@ -95,8 +197,13 @@ export const DashboardPage = () => {
     setActiveTab('dashboard')
   }, [location.pathname])
 
+  // Opening Orders starts at page 1, except when coming back from an order's
+  // details page: then keep the rep's page and filters.
+  const previousTabRef = useRef<ActiveTab>(activeTab)
   useEffect(() => {
-    if (activeTab !== 'orders') return
+    const previousTab = previousTabRef.current
+    previousTabRef.current = activeTab
+    if (activeTab !== 'orders' || previousTab === 'orderDetails') return
     setOrdersPage(1)
   }, [activeTab])
 
@@ -126,6 +233,8 @@ export const DashboardPage = () => {
       }
 
       try {
+        // The Orders tab loads its own data. (Order details still loads the
+        // summary below for the header/sidebar; OrderDetailsView loads the order.)
         if (location.pathname === '/dashboard/orders') {
           return
         }
@@ -163,7 +272,12 @@ export const DashboardPage = () => {
         setEditedName(latestData.representative.name || '')
         setEditedEmail(latestData.representative.email || '')
         localStorage.setItem('repData', JSON.stringify(latestData))
-      } catch {
+      } catch (error) {
+        if (isAuthError(error)) {
+          clearAuthSession()
+          navigate('/')
+          return
+        }
         if (!fallbackData && isMounted) {
           navigate('/')
         }
@@ -185,10 +299,16 @@ export const DashboardPage = () => {
       setIsOrdersLoading(true)
       try {
         const ordersResponse = await getOrdersTableData({
-          filters: {},
+          filters: {
+            search: ordersSearch || undefined,
+            fromDate: ordersFromDate,
+            toDate: ordersToDate,
+            sortBy: ordersSort.sortBy,
+            sortOrder: ordersSort.sortOrder,
+          },
           pagination: {
             page: ordersPage,
-            perPage: 10,
+            perPage: ordersPerPage,
           },
         })
 
@@ -206,6 +326,8 @@ export const DashboardPage = () => {
         const mappedOrders = (ordersResponse.orders ?? []).map((order) => ({
           id: order.id,
           orderId: order.orderId,
+          orderName: order.orderName,
+          orderDetails: order.orderDetails ?? [],
           orderValue: order.orderValue,
           commissionValue: order.commissionValue,
           commission_type: order.commission_type,
@@ -214,24 +336,29 @@ export const DashboardPage = () => {
           createdAt: order.createdAt,
         }))
 
+        // Keep the overview metrics as they are: this list is filtered, so its
+        // count/sum aren't the rep's totals.
         const ordersData: RepDashboardData = {
           ...currentData,
           commissions: mappedOrders,
-          metrics: {
-            totalOrders: ordersResponse.pagination?.totalCount ?? 0,
-            totalCommission: mappedOrders.reduce(
-              (sum, order) => sum + (order.commission_earned ?? 0),
-              0
-            ),
-          },
         }
 
         setOrdersTotalCount(ordersResponse.pagination?.totalCount ?? 0)
         setOrdersTotalPages(ordersResponse.pagination?.totalPages ?? 1)
+        setOrdersError(null)
         setData(ordersData)
         localStorage.setItem('repData', JSON.stringify(ordersData))
-      } catch {
-        // Keep existing table data on fetch failure.
+      } catch (error) {
+        // Logged out (refresh token expired/invalid): go to the login page.
+        if (isAuthError(error)) {
+          clearAuthSession()
+          navigate('/')
+          return
+        }
+        // Show why it failed instead of silently keeping old rows.
+        if (isMounted) {
+          setOrdersError(error instanceof Error ? error.message : 'Failed to load orders')
+        }
       } finally {
         if (isMounted) {
           setIsOrdersLoading(false)
@@ -243,7 +370,80 @@ export const DashboardPage = () => {
     return () => {
       isMounted = false
     }
-  }, [location.pathname, ordersPage])
+  }, [
+    location.pathname,
+    ordersPage,
+    ordersPerPage,
+    ordersSearch,
+    ordersFromDate,
+    ordersToDate,
+    ordersSort,
+    ordersReloadKey,
+    navigate,
+  ])
+
+  const handleOrdersSearchSubmit = (event: { preventDefault: () => void }) => {
+    event.preventDefault()
+    setOrdersSearch(ordersSearchInput.trim())
+    setOrdersPage(1)
+  }
+
+  const handleOrdersSearchClear = () => {
+    setOrdersSearchInput('')
+    setOrdersSearch('')
+    setOrdersPage(1)
+  }
+
+  const handleOrdersPresetChange = (preset: DatePreset) => {
+    setOrdersDatePreset(preset)
+    if (preset !== 'custom') {
+      const range = getPresetRange(preset)
+      setOrdersFromDate(range.from)
+      setOrdersToDate(range.to)
+      setOrdersPage(1)
+    }
+  }
+
+  const handleOrdersDateChange = (end: 'from' | 'to', value: string) => {
+    if (!value) return
+    setOrdersDatePreset('custom')
+    if (end === 'from') setOrdersFromDate(value)
+    else setOrdersToDate(value)
+    setOrdersPage(1)
+  }
+
+  // Click a header to sort by it; click again to flip the direction.
+  const handleOrdersSort = (sortBy: OrdersSortBy) => {
+    setOrdersSort((prev) =>
+      prev.sortBy === sortBy
+        ? { sortBy, sortOrder: prev.sortOrder === 'asc' ? 'desc' : 'asc' }
+        : { sortBy, sortOrder: 'desc' }
+    )
+    setOrdersPage(1)
+  }
+
+  const handleOrdersPerPageChange = (value: number) => {
+    setOrdersPerPage(value)
+    setOrdersPage(1)
+  }
+
+  // Open an order's details page; `from` is where its Back button returns to.
+  const openOrderDetails = (commissionId: number, from: '/dashboard' | '/dashboard/orders') => {
+    navigate(`${ORDER_DETAILS_PATH_PREFIX}${commissionId}`, { state: { from } })
+  }
+
+  // Rows act as links: open on click, or Enter/Space when focused.
+  const orderRowProps = (commissionId: number, from: '/dashboard' | '/dashboard/orders') => ({
+    role: 'link' as const,
+    tabIndex: 0,
+    onClick: () => openOrderDetails(commissionId, from),
+    onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        openOrderDetails(commissionId, from)
+      }
+    },
+  })
 
   const goToTab = (tab: ActiveTab) => {
     const tabPath =
@@ -270,6 +470,18 @@ export const DashboardPage = () => {
       clearAuthSession()
       navigate('/')
     }
+  }
+
+  // Both Logout buttons (sidebar + profile menu) ask for confirmation first.
+  const requestLogout = () => {
+    setShowProfileDropdown(false)
+    setIsMobileMenuOpen(false)
+    setShowLogoutConfirm(true)
+  }
+
+  const confirmLogout = async () => {
+    setIsLoggingOut(true)
+    await handleLogout()
   }
 
   const handleSaveProfile = async () => {
@@ -300,8 +512,12 @@ export const DashboardPage = () => {
       setIsProfileEditing(false)
       setShowProfileEdit(false)
       setShowProfileDropdown(false)
-    } catch {
-      // Keep edit mode open so user can retry.
+    } catch (error) {
+      if (isAuthError(error)) {
+        clearAuthSession()
+        navigate('/')
+      }
+      // Otherwise keep edit mode open so user can retry.
     }
   }
 
@@ -341,7 +557,8 @@ export const DashboardPage = () => {
         .toUpperCase()
         .slice(0, 2)
     }
-    return email[0].toUpperCase()
+    // Email can be empty before the profile has loaded.
+    return (email?.[0] ?? '?').toUpperCase()
   }
 
   const formatOrderId = (rawOrderId: string) => {
@@ -394,7 +611,7 @@ export const DashboardPage = () => {
           </button>
 
           <button
-            className={`nav-item ${activeTab === 'orders' ? 'active' : ''}`}
+            className={`nav-item ${activeTab === 'orders' || activeTab === 'orderDetails' ? 'active' : ''}`}
             onClick={() => {
               goToTab('orders')
               setIsMobileMenuOpen(false)
@@ -428,10 +645,7 @@ export const DashboardPage = () => {
 
         <div className="sidebar-footer">
           <button
-            onClick={() => {
-              void handleLogout()
-              setIsMobileMenuOpen(false)
-            }}
+            onClick={requestLogout}
             className="logout-nav-button"
             title="Logout"
           >
@@ -539,7 +753,7 @@ export const DashboardPage = () => {
                     Edit Profile
                   </button>
                   <div className="dropdown-divider" />
-                  <button className="dropdown-item" onClick={() => void handleLogout()}>
+                  <button className="dropdown-item" onClick={requestLogout}>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
                       <polyline points="16 17 21 12 16 7" />
@@ -560,6 +774,7 @@ export const DashboardPage = () => {
               <h1 className="page-title">
                 {activeTab === 'dashboard' && 'Dashboard'}
                 {activeTab === 'orders' && 'Orders & Commissions'}
+                {activeTab === 'orderDetails' && 'Order details'}
                 {activeTab === 'profile' && 'Profile'}
               </h1>
               {activeTab === 'dashboard' && (
@@ -567,6 +782,9 @@ export const DashboardPage = () => {
               )}
               {activeTab === 'orders' && (
                 <p className="page-subtitle">Detailed view of all orders and commissions.</p>
+              )}
+              {activeTab === 'orderDetails' && (
+                <p className="page-subtitle">Products, amounts and your commission for this order.</p>
               )}
               {activeTab === 'profile' && (
                 <p className="page-subtitle">Manage your representative profile information.</p>
@@ -637,10 +855,16 @@ export const DashboardPage = () => {
                 ) : (
                   <div className="orders-preview">
                     {commissions.slice(0, 5).map((commission) => (
-                      <div key={commission.id} className="order-preview-item">
+                      <div
+                        key={commission.id}
+                        className="order-preview-item clickable-row"
+                        aria-label={`View order ${commission.orderName || formatOrderId(commission.orderId)}`}
+                        {...orderRowProps(commission.id, '/dashboard')}
+                      >
                         <div className="order-info">
                           <span className="order-id">
-                            Order #{formatOrderId(commission.orderId)}
+                            {/* orderName already includes the "#" (e.g. #1002) */}
+                            Order {commission.orderName || `#${formatOrderId(commission.orderId)}`}
                           </span>
                           <span className="order-date">
                             {new Date(commission.createdAt).toLocaleDateString()}
@@ -661,72 +885,277 @@ export const DashboardPage = () => {
           )}
 
           {activeTab === 'orders' && (
-            <div className="content-card">
+            <div className="content-card orders-card">
               <div className="card-header">
                 <h2>Orders & Commissions</h2>
-                <span className="orders-count">{ordersTotalCount || totalOrders} orders</span>
+                <span className="orders-count">
+                  {ordersTotalCount} {ordersTotalCount === 1 ? 'order' : 'orders'}
+                </span>
               </div>
-              {isOrdersLoading && (
-                <div className="empty-state">
-                  <p>Loading orders...</p>
+
+              {/* Filter bar: same filters as the admin Orders page */}
+              <div className="orders-filters">
+                <form className="orders-search" role="search" onSubmit={handleOrdersSearchSubmit}>
+                  <div className="orders-search-field">
+                    <span className="orders-search-icon">
+                      <Icon path={ICON_SEARCH} />
+                    </span>
+                    <input
+                      type="text"
+                      inputMode="search"
+                      className="orders-search-input"
+                      placeholder="Search order #"
+                      aria-label="Search orders"
+                      value={ordersSearchInput}
+                      onChange={(e) => setOrdersSearchInput(e.target.value)}
+                    />
+                    {(ordersSearch || ordersSearchInput) && (
+                      <button
+                        type="button"
+                        className="orders-search-clear"
+                        onClick={handleOrdersSearchClear}
+                        aria-label="Clear search"
+                        title="Clear search"
+                      >
+                        <Icon path={ICON_CLOSE} size={14} />
+                      </button>
+                    )}
+                  </div>
+                  <button type="submit" className="orders-button orders-button-primary">
+                    Search
+                  </button>
+                </form>
+
+                <div className="orders-date-range">
+                  <Select
+                    className="orders-date-preset"
+                    variant="ghost"
+                    ariaLabel="Date range"
+                    icon={<Icon path={ICON_CALENDAR} />}
+                    options={DATE_PRESET_OPTIONS}
+                    value={ordersDatePreset}
+                    onChange={handleOrdersPresetChange}
+                  />
+                  <div className="orders-date-inputs">
+                    <label className="orders-date-field">
+                      <span className="orders-date-field-label">From</span>
+                      <input
+                        type="date"
+                        className="orders-date-input"
+                        aria-label="From date"
+                        value={ordersFromDate}
+                        max={ordersToDate}
+                        onChange={(e) => handleOrdersDateChange('from', e.target.value)}
+                      />
+                    </label>
+                    <span className="orders-date-sep" aria-hidden="true">
+                      to
+                    </span>
+                    <label className="orders-date-field">
+                      <span className="orders-date-field-label">To</span>
+                      <input
+                        type="date"
+                        className="orders-date-input"
+                        aria-label="To date"
+                        value={ordersToDate}
+                        min={ordersFromDate}
+                        onChange={(e) => handleOrdersDateChange('to', e.target.value)}
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+              <p className="orders-filters-hint">
+                Dates are in UTC. Click a column header to sort.
+              </p>
+
+              {ordersError && (
+                <div className="orders-error" role="alert">
+                  <span>Couldn't load orders: {ordersError}</span>
+                  <button
+                    type="button"
+                    className="orders-button"
+                    onClick={() => setOrdersReloadKey((key) => key + 1)}
+                    disabled={isOrdersLoading}
+                  >
+                    Retry
+                  </button>
                 </div>
               )}
-              {!isOrdersLoading && commissions.length === 0 ? (
+
+              {commissions.length === 0 ? (
                 <div className="empty-state">
-                  <p>No commissions found.</p>
+                  <p>
+                    {isOrdersLoading
+                      ? 'Loading orders...'
+                      : 'No orders found for the selected filters.'}
+                  </p>
                 </div>
               ) : (
-                <div className="commissions-table-wrapper">
-                  <table className="commissions-table">
+                <div
+                  className={`commissions-table-wrapper ${isOrdersLoading ? 'is-loading' : ''}`}
+                  aria-busy={isOrdersLoading}
+                >
+                  <table className="commissions-table orders-table">
                     <thead>
                       <tr>
-                        <th>Order ID</th>
-                        <th>Order Value</th>
-                        <th>Commission Type</th>
-                        <th>Commission Rate</th>
-                        <th>Commission Earned</th>
-                        <th>Date</th>
+                        {ORDERS_COLUMNS.map((column) => {
+                          if (!column.sortBy) return <th key={column.label}>{column.label}</th>
+                          const sortBy = column.sortBy
+                          const isActive = ordersSort.sortBy === sortBy
+                          return (
+                            <th
+                              key={column.label}
+                              aria-sort={
+                                isActive
+                                  ? ordersSort.sortOrder === 'asc'
+                                    ? 'ascending'
+                                    : 'descending'
+                                  : 'none'
+                              }
+                            >
+                              <button
+                                type="button"
+                                className={`sort-header ${isActive ? 'sort-header-active' : ''}`}
+                                onClick={() => handleOrdersSort(sortBy)}
+                                disabled={isOrdersLoading}
+                              >
+                                {column.label}
+                                <span className="sort-indicator">
+                                  <Icon
+                                    size={13}
+                                    path={
+                                      isActive
+                                        ? ordersSort.sortOrder === 'asc'
+                                          ? ICON_SORT_ASC
+                                          : ICON_SORT_DESC
+                                        : ICON_SORT
+                                    }
+                                  />
+                                </span>
+                              </button>
+                            </th>
+                          )
+                        })}
                       </tr>
                     </thead>
                     <tbody>
-                      {commissions.map((commission) => (
-                        <tr key={commission.id}>
-                          <td className="order-id-cell">
-                            {formatOrderId(commission.orderId)}
-                          </td>
-                          <td>${commission.orderValue.toFixed(2)}</td>
-                          <td>{commission.commission_type || '-'}</td>
-                          <td>{commission.commissionValue ? `${commission.commissionValue}%` : '-'}</td>
-                          <td className="commission-earned">
-                            ${commission.commission_earned.toFixed(2)}
-                          </td>
-                          <td>{new Date(commission.createdAt).toLocaleDateString()}</td>
-                        </tr>
-                      ))}
+                      {commissions.map((commission) => {
+                        const items = commission.orderDetails ?? []
+                        const hiddenItems = items.length - MAX_VISIBLE_ITEMS
+                        // Used by the Status column (commented out below for now).
+                        // const status = (commission.status || '').toUpperCase()
+                        return (
+                          <tr
+                            key={commission.id}
+                            className="clickable-row"
+                            aria-label={`View order ${commission.orderName || formatOrderId(commission.orderId)}`}
+                            {...orderRowProps(commission.id, '/dashboard/orders')}
+                          >
+                            {/* data-label: column name shown on phones, where rows become cards. */}
+                            <td className="order-id-cell" data-label="Order ID">
+                              {/* Shopify order name (e.g. #1002); fall back to the numeric ID */}
+                              {commission.orderName || formatOrderId(commission.orderId)}
+                            </td>
+                            <td data-label="Order value">${commission.orderValue.toFixed(2)}</td>
+                            <td data-label="Commission %">
+                              {commission.commissionValue ? `${commission.commissionValue}%` : '-'}
+                            </td>
+                            <td className="commission-earned" data-label="Earned">
+                              ${commission.commission_earned.toFixed(2)}
+                            </td>
+                            {/* Status column hidden for now (UI only).
+                            <td>
+                              <span className={`order-status order-status-${status.toLowerCase()}`}>
+                                {status || '-'}
+                              </span>
+                            </td> */}
+                            <td className="order-date-cell" data-label="Date">
+                              {new Date(commission.createdAt).toLocaleDateString()}
+                            </td>
+                            <td className="order-items-cell" data-label="Items">
+                              {items.length === 0 ? (
+                                '—'
+                              ) : (
+                                <>
+                                  {items.slice(0, MAX_VISIBLE_ITEMS).map((item, index) => (
+                                    <span key={index} className="order-item">
+                                      {formatLineItem(item)}
+                                    </span>
+                                  ))}
+                                  {hiddenItems > 0 && (
+                                    <span
+                                      className="order-item order-item-more"
+                                      title={items.map(formatLineItem).join(', ')}
+                                    >
+                                      +{hiddenItems} more
+                                    </span>
+                                  )}
+                                </>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
               )}
-              <div className="orders-pagination">
-                <button
-                  className="button-secondary"
-                  onClick={() => setOrdersPage((prev) => Math.max(1, prev - 1))}
-                  disabled={ordersPage <= 1 || isOrdersLoading}
-                >
-                  Previous
-                </button>
-                <span className="orders-count">
-                  Page {ordersPage} of {Math.max(1, ordersTotalPages)}
+              <div className="orders-pager">
+                <span className="orders-pager-summary">
+                  {ordersTotalCount > 0
+                    ? `Showing ${(ordersPage - 1) * ordersPerPage + 1}–${Math.min(
+                        ordersPage * ordersPerPage,
+                        ordersTotalCount
+                      )} of ${ordersTotalCount} ${ordersTotalCount === 1 ? 'order' : 'orders'}`
+                    : '0 orders'}
                 </span>
-                <button
-                  className="button-secondary"
-                  onClick={() => setOrdersPage((prev) => Math.min(Math.max(1, ordersTotalPages), prev + 1))}
-                  disabled={ordersPage >= Math.max(1, ordersTotalPages) || isOrdersLoading}
-                >
-                  Next
-                </button>
+                <div className="orders-pager-controls">
+                  <Select
+                    className="orders-per-page"
+                    size="sm"
+                    label="Rows per page"
+                    options={ORDERS_PER_PAGE_OPTIONS.map((size) => ({
+                      value: size,
+                      label: String(size),
+                    }))}
+                    value={ordersPerPage}
+                    onChange={handleOrdersPerPageChange}
+                  />
+                  <div className="orders-pager-nav">
+                    <button
+                      type="button"
+                      className="orders-icon-button"
+                      onClick={() => setOrdersPage((prev) => Math.max(1, prev - 1))}
+                      disabled={ordersPage <= 1 || isOrdersLoading}
+                      aria-label="Previous page"
+                      title="Previous page"
+                    >
+                      <Icon path={ICON_CHEVRON_LEFT} />
+                    </button>
+                    <span className="orders-pager-page">
+                      Page {ordersPage} of {Math.max(1, ordersTotalPages)}
+                    </span>
+                    <button
+                      type="button"
+                      className="orders-icon-button"
+                      onClick={() =>
+                        setOrdersPage((prev) => Math.min(Math.max(1, ordersTotalPages), prev + 1))
+                      }
+                      disabled={ordersPage >= Math.max(1, ordersTotalPages) || isOrdersLoading}
+                      aria-label="Next page"
+                      title="Next page"
+                    >
+                      <Icon path={ICON_CHEVRON_RIGHT} />
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
+          )}
+
+          {activeTab === 'orderDetails' && orderIdParam && (
+            <OrderDetailsView orderId={orderIdParam} />
           )}
 
           {activeTab === 'profile' && (
@@ -876,6 +1305,25 @@ export const DashboardPage = () => {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={showLogoutConfirm}
+        tone="danger"
+        title="Log out?"
+        message="You'll need to sign in again to see your orders and commissions."
+        confirmLabel="Log out"
+        loading={isLoggingOut}
+        loadingLabel="Logging out..."
+        icon={
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+        }
+        onConfirm={() => void confirmLogout()}
+        onCancel={() => setShowLogoutConfirm(false)}
+      />
     </div>
   )
 }

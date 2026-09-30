@@ -21,6 +21,10 @@ export const router = createBrowserRouter([
     element: <DashboardPage />,
   },
   {
+    path: '/dashboard/orders/:orderId',
+    element: <DashboardPage />,
+  },
+  {
     path: '/dashboard/profile',
     element: <DashboardPage />,
   },
