@@ -1,0 +1,35 @@
+# Single-page app fallback for Apache.
+# The dashboard's routes (/dashboard, /dashboard/orders, /dashboard/orders/2,
+# /reset-password ...) exist only in the browser (React Router). Without this,
+# refreshing or opening one of them directly makes Apache look for a real file
+# and answer "404 Not Found". This sends every URL that is not a real file or
+# folder to index.html, and the app then shows the right page.
+#
+# Vite copies this file from public/ into dist/ on every build.
+# Requires `AllowOverride All` (or at least FileInfo) for the site's folder.
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # Real files and folders (JS, CSS, images, index.html) are served as they are.
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+
+  # Everything else goes to the app.
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+# Used when mod_rewrite is not enabled.
+<IfModule !mod_rewrite.c>
+  FallbackResource /index.html
+</IfModule>
+
+# Always fetch a fresh index.html so a new deploy is picked up right away
+# (the JS/CSS files have hashed names, so they can stay cached).
+<IfModule mod_headers.c>
+  <Files "index.html">
+    Header set Cache-Control "no-cache"
+  </Files>
+</IfModule>
