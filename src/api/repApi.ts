@@ -480,6 +480,15 @@ export async function getOrdersTableData(payload: OrdersTableRequest): Promise<O
   return data as OrdersTableResponse
 }
 
+/** Order's customer; null for older orders whose details aren't available. */
+export type OrderCustomer = {
+  name: string | null
+  email: string | null
+  phone: string | null
+  /** Display lines: company, street, "City, Province, Zip", country. */
+  shippingAddress: string[]
+}
+
 export type OrderDetails = {
   id: number
   orderId: string
@@ -491,6 +500,7 @@ export type OrderDetails = {
   commission_earned: number
   createdAt: string
   updatedAt: string
+  customer?: OrderCustomer | null
 }
 
 /** One order (by commission id) for the Order details page. */

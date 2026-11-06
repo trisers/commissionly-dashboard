@@ -2479,6 +2479,26 @@
   font-weight: 700;
 }
 
+.od-info-subheading {
+  margin: 1.5rem 0 0.875rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #e5e7eb;
+  color: #1f2937;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+/* Address lines stack inside the right-aligned value */
+.od-info-list dd.od-break {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.od-info-list dd a {
+  color: inherit;
+}
+
 .od-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   word-break: break-all;
@@ -2563,4 +2583,9 @@
 
 .dark-mode .od-totals-main dt {
   color: #f1f5f9;
+}
+
+.dark-mode .od-info-subheading {
+  border-top-color: #334155;
+  color: #e2e8f0;
 }
