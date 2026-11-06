@@ -257,6 +257,46 @@ export function OrderDetailsView({ orderId }: OrderDetailsViewProps) {
               <dd className="od-positive">{money(order.commission_earned)}</dd>
             </div>
           </dl>
+
+          <h3 className="od-info-subheading">Customer</h3>
+          {order.customer ? (
+            <dl className="od-info-list">
+              <div>
+                <dt>Name</dt>
+                <dd>{order.customer.name || '-'}</dd>
+              </div>
+              <div>
+                <dt>Email</dt>
+                <dd className="od-break">
+                  {order.customer.email ? (
+                    <a href={`mailto:${order.customer.email}`}>{order.customer.email}</a>
+                  ) : (
+                    '-'
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>Phone</dt>
+                <dd>
+                  {order.customer.phone ? (
+                    <a href={`tel:${order.customer.phone}`}>{order.customer.phone}</a>
+                  ) : (
+                    '-'
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>Shipping address</dt>
+                <dd className="od-break">
+                  {order.customer.shippingAddress.length > 0
+                    ? order.customer.shippingAddress.map((line, i) => <div key={i}>{line}</div>)
+                    : '-'}
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <p className="od-note">Customer details aren't available for this order.</p>
+          )}
         </div>
       </div>
     </div>
